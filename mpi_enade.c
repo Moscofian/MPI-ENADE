@@ -1,6 +1,6 @@
-// Arquivo: analisador_enade_final.c
-// Versão final com a lógica correta, usando o arquivo da Pergunta 18 para
-// responder sobre o Ensino Médio Técnico.
+// Arquivo: analisador_enade_final_robusto.c
+// Versão que primeiro mapeia todos os cursos de ADS usando CO_GRUPO = 72
+// e depois usa esse mapa para filtrar os dados das perguntas.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,158 +8,141 @@
 #include <mpi.h>
 
 // --- CONFIGURAÇÃO ---
-const char* NOMES_ARQUIVOS[] = {
-    "DADOS_2021/microdados2021_arq5.txt",   // Sexo (TP_SEXO)
-    "DADOS_2021/microdados2021_arq21.txt",  // Ação Afirmativa (QE_I15)
-    // ATUALIZAÇÃO: Usando o arquivo da pergunta 18 para o tipo de Ensino Médio
-    "DADOS_2021/microdados2021_arq24.txt",  // Modalidade Ensino Médio (QE_I18)
-    "DADOS_2021/microdados2021_arq25.txt",  // Incentivo (QE_I19)
-    "DADOS_2021/microdados2021_arq27.txt",  // Família com Superior (QE_I21)
-    "DADOS_2021/microdados2021_arq28.txt",  // Livros (QE_I22)
-    "DADOS_2021/microdados2021_arq29.txt"   // Horas de Estudo (QE_I23)
+// ATUALIZAÇÃO: O primeiro arquivo da lista agora é o arq1, que mapeia os cursos.
+const char* ARQUIVO_MAPA_CURSOS = "DADOS_2021/microdados2021_arq1.txt";
+const char* NOMES_ARQUIVOS_PERGUNTAS[] = {
+    "DADOS_2021/microdados2021_arq5.txt",
+    "DADOS_2021/microdados2021_arq21.txt",
+    "DADOS_2021/microdados2021_arq24.txt",
+    "DADOS_2021/microdados2021_arq25.txt",
+    "DADOS_2021/microdados2021_arq27.txt",
+    "DADOS_2021/microdados2021_arq28.txt",
+    "DADOS_2021/microdados2021_arq29.txt"
 };
-const int NUM_ARQUIVOS = 7;
-const char* CODIGO_CURSO_ADS = "\"63045\"";
+const int NUM_ARQUIVOS_PERGUNTAS = 7;
+const char* CODIGO_GRUPO_ADS = "72"; // O código de área correto
 
 #define MAX_LINE_LEN 256
-#define NUM_RESULTS 15 
+#define NUM_RESULTS 15
 
-/* MAPEAMENTO DOS CONTADORES DE RESULTADOS (ÍNDICES DO ARRAY):
- * 0: [Q1] Total de alunos em Ação Afirmativa
- * 1: [Q2] Total de MULHERES em Ação Afirmativa
- * 2: [Q3] Total de Mulheres em A.A. que fizeram Ensino Técnico (QE_I18, Resposta 'B')
- * 3: [Q4] Total de Mulheres em A.A. com incentivo dos PAIS (QE_I19, Resposta 'B')
- * 4: [Q5] Total de alunos em A.A. com família com curso superior (QE_I21, Resposta 'A')
- * ... (resto do mapeamento para livros e horas continua o mesmo)
- */
+// Função auxiliar para verificar se um co_curso pertence à lista de cursos de ADS
+int is_ads_course(const char* co_curso, char** ads_course_list, int count) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(co_curso, ads_course_list[i]) == 0) {
+            return 1; // Encontrado
+        }
+    }
+    return 0; // Não encontrado
+}
 
+// A função de análise do bloco continua a mesma
 void analisar_bloco(char* bloco, long* resultados_locais) {
     char* linha_saveptr;
     char* linha = strtok_r(bloco, "\n", &linha_saveptr);
-    
     while (linha != NULL) {
-        char* campos[10];
-        int i = 0;
-        
+        char* campos[10]; int i = 0;
         char* campo_saveptr;
         char* token = strtok_r(linha, ";", &campo_saveptr);
-        while (token != NULL && i < 10) {
-            campos[i++] = token;
-            token = strtok_r(NULL, ";", &campo_saveptr);
-        }
-
+        while (token != NULL && i < 10) { campos[i++] = token; token = strtok_r(NULL, ";", &campo_saveptr); }
         if (i >= 9) {
-            const char* sexo = campos[2];
-            const char* acao_afirmativa = campos[3];
-            const char* modalidade_ens_medio = campos[4]; // Vem da Pergunta 18 agora
-            const char* incentivo = campos[5];
-            const char* familia_superior = campos[6];
-            const char* livros = campos[7];
-            const char* horas_estudo = campos[8];
-
-            int ehAcaoAfirmativa = (strcmp(acao_afirmativa, "\"A\"") != 0);
-            int ehFeminino = (strcmp(sexo, "\"F\"") == 0);
-
-            // Bloco 1: Perguntas com filtro de Ação Afirmativa
+            const char* sexo = campos[2], *acao_afirmativa = campos[3], *modalidade_ens_medio = campos[4], *incentivo = campos[5], *familia_superior = campos[6], *livros = campos[7], *horas_estudo = campos[8];
+            int ehAcaoAfirmativa = (strcmp(acao_afirmativa, "\"A\"") != 0), ehFeminino = (strcmp(sexo, "\"F\"") == 0);
             if (ehAcaoAfirmativa) {
-                resultados_locais[0]++; // Pergunta 1
-                if (strcmp(familia_superior, "\"A\"") == 0) resultados_locais[4]++; // Pergunta 5
-                
-                if (ehFeminino) {
-                    resultados_locais[1]++; // Pergunta 2
-                    
-                    // ATUALIZAÇÃO: Lógica da pergunta 3 agora funciona com os dados corretos
-                    if (strcmp(modalidade_ens_medio, "\"B\"") == 0) resultados_locais[2]++;
-                    
-                    if (strcmp(incentivo, "\"B\"") == 0) resultados_locais[3]++;
-                }
+                resultados_locais[0]++; if (strcmp(familia_superior, "\"A\"") == 0) resultados_locais[4]++;
+                if (ehFeminino) { resultados_locais[1]++; if (strcmp(modalidade_ens_medio, "\"B\"") == 0) resultados_locais[2]++; if (strcmp(incentivo, "\"B\"") == 0) resultados_locais[3]++; }
             }
-            // Bloco 2: Pergunta sobre Livros (INDEPENDENTE)
-            if (strcmp(livros, "\"A\"") == 0) resultados_locais[5]++;
-            else if (strcmp(livros, "\"B\"") == 0) resultados_locais[6]++;
-            else if (strcmp(livros, "\"C\"") == 0) resultados_locais[7]++;
-            else if (strcmp(livros, "\"D\"") == 0) resultados_locais[8]++;
-            else if (strcmp(livros, "\"E\"") == 0) resultados_locais[9]++;
-            // Bloco 3: Pergunta sobre Horas de Estudo (INDEPENDENTE)
-            if (strcmp(horas_estudo, "\"A\"") == 0) resultados_locais[10]++;
-            else if (strcmp(horas_estudo, "\"B\"") == 0) resultados_locais[11]++;
-            else if (strcmp(horas_estudo, "\"C\"") == 0) resultados_locais[12]++;
-            else if (strcmp(horas_estudo, "\"D\"") == 0) resultados_locais[13]++;
-            else if (strcmp(horas_estudo, "\"E\"") == 0) resultados_locais[14]++;
+            if (strcmp(livros, "\"A\"") == 0) resultados_locais[5]++; else if (strcmp(livros, "\"B\"") == 0) resultados_locais[6]++; else if (strcmp(livros, "\"C\"") == 0) resultados_locais[7]++; else if (strcmp(livros, "\"D\"") == 0) resultados_locais[8]++; else if (strcmp(livros, "\"E\"") == 0) resultados_locais[9]++;
+            if (strcmp(horas_estudo, "\"A\"") == 0) resultados_locais[10]++; else if (strcmp(horas_estudo, "\"B\"") == 0) resultados_locais[11]++; else if (strcmp(horas_estudo, "\"C\"") == 0) resultados_locais[12]++; else if (strcmp(horas_estudo, "\"D\"") == 0) resultados_locais[13]++; else if (strcmp(horas_estudo, "\"E\"") == 0) resultados_locais[14]++;
         }
         linha = strtok_r(NULL, "\n", &linha_saveptr);
     }
 }
-
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
     int rank, n_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &n_procs);
-
     long resultados_locais[NUM_RESULTS] = {0};
 
-    // ETAPA 1: MESTRE (RANK 0) FAZ TODA A LEITURA E UNIFICAÇÃO EM MEMÓRIA
+    // ETAPA 1: MESTRE (RANK 0) MAPEIA OS CURSOS DE ADS
     if (rank == 0) {
-        printf("Mestre (Rank 0): Lendo e unificando dados...\n");
-        FILE* readers[NUM_ARQUIVOS];
-        for (int i = 0; i < NUM_ARQUIVOS; i++) {
-            readers[i] = fopen(NOMES_ARQUIVOS[i], "r");
-            if (!readers[i]) {
-                fprintf(stderr, "Erro: Falha ao abrir o arquivo %s\n", NOMES_ARQUIVOS[i]);
-                MPI_Abort(MPI_COMM_WORLD, 1);
-            }
-            char header_buffer[MAX_LINE_LEN];
-            fgets(header_buffer, sizeof(header_buffer), readers[i]);
-        }
+        printf("Mestre (Rank 0): Lendo arquivo de mapa de cursos (%s)...\n", ARQUIVO_MAPA_CURSOS);
+        FILE* fp_mapa = fopen(ARQUIVO_MAPA_CURSOS, "r");
+        if (!fp_mapa) { fprintf(stderr, "Erro: Falha ao abrir mapa de cursos.\n"); MPI_Abort(MPI_COMM_WORLD, 1); }
+        
+        char** ads_courses_list = NULL;
+        int ads_courses_count = 0;
+        char line[MAX_LINE_LEN];
+        fgets(line, sizeof(line), fp_mapa); // Pula cabeçalho
 
+        while (fgets(line, sizeof(line), fp_mapa)) {
+            char* co_curso_str;
+            char* co_grupo_str;
+            // É preciso pegar as colunas corretas de co_grupo e co_curso
+            // Vamos supor que são a 2a e 5a coluna, respectivamente. VERIFIQUE NO DICIONÁRIO!
+            strtok(line, ";"); // NU_ANO
+            co_curso_str = strtok(NULL, ";"); // CO_CURSO
+            strtok(NULL, ";"); // CO_IES
+            strtok(NULL, ";"); // CO_CATEGAD
+            co_grupo_str = strtok(NULL, ";"); // CO_GRUPO
+
+            if (co_grupo_str && strcmp(co_grupo_str, CODIGO_GRUPO_ADS) == 0) {
+                ads_courses_count++;
+                ads_courses_list = realloc(ads_courses_list, ads_courses_count * sizeof(char*));
+                ads_courses_list[ads_courses_count - 1] = strdup(co_curso_str);
+            }
+        }
+        fclose(fp_mapa);
+        printf("Mestre (Rank 0): Mapeamento concluído. %d cursos de ADS encontrados.\n", ads_courses_count);
+        printf("Mestre (Rank 0): Lendo e unificando dados das perguntas...\n");
+
+        // ETAPA 2: MESTRE UNIFICA OS DADOS DAS PERGUNTAS USANDO O MAPA
+        FILE* readers[NUM_ARQUIVOS_PERGUNTAS];
+        for (int i = 0; i < NUM_ARQUIVOS_PERGUNTAS; i++) {
+            readers[i] = fopen(NOMES_ARQUIVOS_PERGUNTAS[i], "r");
+            if (!readers[i]) { fprintf(stderr, "Erro: Falha ao abrir o arquivo %s\n", NOMES_ARQUIVOS_PERGUNTAS[i]); MPI_Abort(MPI_COMM_WORLD, 1); }
+            fgets(line, sizeof(line), readers[i]);
+        }
         size_t buffer_size = 1024 * 1024;
         char* dados_unificados = malloc(buffer_size);
-        if (!dados_unificados) { MPI_Abort(MPI_COMM_WORLD, 1); }
         size_t current_pos = 0;
         dados_unificados[0] = '\0';
-        
-        char linhas[NUM_ARQUIVOS][MAX_LINE_LEN];
+        char linhas[NUM_ARQUIVOS_PERGUNTAS][MAX_LINE_LEN];
+
         while(fgets(linhas[0], sizeof(linhas[0]), readers[0]) != NULL) {
             int linha_valida = 1;
-            for(int i = 1; i < NUM_ARQUIVOS; i++) {
-                if (fgets(linhas[i], sizeof(linhas[i]), readers[i]) == NULL) {
-                    linha_valida = 0;
-                    break;
-                }
-            }
+            for(int i = 1; i < NUM_ARQUIVOS_PERGUNTAS; i++) { if (fgets(linhas[i], sizeof(linhas[i]), readers[i]) == NULL) { linha_valida = 0; break; } }
             if (!linha_valida) break;
 
-            if (strstr(linhas[0], CODIGO_CURSO_ADS) != NULL) {
+            char temp_line[MAX_LINE_LEN];
+            strcpy(temp_line, linhas[0]);
+            char* ano = strtok(temp_line, ";");
+            char* curso = strtok(NULL, ";");
+
+            // ATUALIZAÇÃO: Filtro agora usa a lista de cursos mapeados
+            if (curso && is_ads_course(curso, ads_courses_list, ads_courses_count)) {
                 char linha_combinada[MAX_LINE_LEN * 2];
-                char* ano = strtok(linhas[0], ";");
-                char* curso = strtok(NULL, ";");
                 sprintf(linha_combinada, "%s;%s", ano, curso);
-                char* respostas[NUM_ARQUIVOS];
+                char* respostas[NUM_ARQUIVOS_PERGUNTAS];
                 strtok(linhas[0], ";"); strtok(NULL, ";"); respostas[0] = strtok(NULL, "\n\r");
-                for(int i = 1; i < NUM_ARQUIVOS; i++) {
-                     strtok(linhas[i], ";"); strtok(NULL, ";"); respostas[i] = strtok(NULL, "\n\r");
-                }
-                for(int i=0; i<NUM_ARQUIVOS; i++) {
-                    strcat(linha_combinada, ";");
-                    if (respostas[i]) strcat(linha_combinada, respostas[i]);
-                }
+                for(int i = 1; i < NUM_ARQUIVOS_PERGUNTAS; i++) { strtok(linhas[i], ";"); strtok(NULL, ";"); respostas[i] = strtok(NULL, "\n\r"); }
+                for(int i = 0; i < NUM_ARQUIVOS_PERGUNTAS; i++) { strcat(linha_combinada, ";"); if (respostas[i]) strcat(linha_combinada, respostas[i]); }
                 strcat(linha_combinada, "\n");
                 if (current_pos + strlen(linha_combinada) + 1 > buffer_size) {
                     buffer_size *= 2;
                     dados_unificados = realloc(dados_unificados, buffer_size);
-                    if (!dados_unificados) { MPI_Abort(MPI_COMM_WORLD, 1); }
                 }
                 strcpy(dados_unificados + current_pos, linha_combinada);
                 current_pos += strlen(linha_combinada);
             }
         }
-        
-        for (int i=0; i<NUM_ARQUIVOS; i++) fclose(readers[i]);
+        for (int i=0; i<NUM_ARQUIVOS_PERGUNTAS; i++) fclose(readers[i]);
+        for (int i=0; i<ads_courses_count; i++) free(ads_courses_list[i]);
+        free(ads_courses_list);
         printf("Mestre (Rank 0): Leitura concluída. Total de %zu bytes para TADS. Distribuindo trabalho...\n", current_pos);
 
-        // ETAPA 2: MESTRE DISTRIBUI O TRABALHO
+        // O resto do código (distribuição, etc.) continua igual...
         long chunk_size = current_pos / n_procs;
         for (int i = 1; i < n_procs; i++) {
             long start = i * chunk_size;
@@ -167,7 +150,6 @@ int main(int argc, char** argv) {
             MPI_Send(&size_to_send, 1, MPI_LONG, i, 0, MPI_COMM_WORLD);
             MPI_Send(dados_unificados + start, size_to_send, MPI_CHAR, i, 0, MPI_COMM_WORLD);
         }
-        
         long my_chunk_size = chunk_size;
         char* my_bloco = malloc(my_chunk_size + 1);
         strncpy(my_bloco, dados_unificados, my_chunk_size);
@@ -176,7 +158,6 @@ int main(int argc, char** argv) {
         free(my_bloco);
         free(dados_unificados);
     } 
-    // ETAPA 3: TRABALHADORES RECEBEM E PROCESSAM
     else {
         long size_to_recv;
         MPI_Recv(&size_to_recv, 1, MPI_LONG, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -186,31 +167,22 @@ int main(int argc, char** argv) {
         analisar_bloco(bloco_recebido, resultados_locais);
         free(bloco_recebido);
     }
-
-    // ETAPA 4: AGREGAÇÃO DOS RESULTADOS E IMPRESSÃO
     long resultados_globais[NUM_RESULTS] = {0};
     MPI_Reduce(resultados_locais, resultados_globais, NUM_RESULTS, MPI_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
-
     if (rank == 0) {
-        long totalAfirmativa = resultados_globais[0];
-        long mulheresAfirmativa = resultados_globais[1];
-        long mulheresTecnico = resultados_globais[2];
-        
+        long totalAfirmativa = resultados_globais[0], mulheresAfirmativa = resultados_globais[1], mulheresTecnico = resultados_globais[2];
         printf("\n--- RESULTADOS DA ANÁLISE ENADE 2021 (TADS) ---\n\n");
         printf("1. Total de alunos que ingressaram por Ações Afirmativas: %ld\n", totalAfirmativa);
         printf("2. Porcentagem de mulheres dentre os que ingressaram por Ações Afirmativas: %.2f%%\n", totalAfirmativa > 0 ? (double)mulheresAfirmativa / totalAfirmativa * 100.0 : 0);
-        // ATUALIZAÇÃO: Impressão da Pergunta 3 agora mostra o resultado calculado
         printf("3. Dentre as mulheres de A.A., porcentagem que concluiu Ensino Técnico: %.2f%%\n", mulheresAfirmativa > 0 ? (double)mulheresTecnico / mulheresAfirmativa * 100.0 : 0);
         printf("4. Dentre as mulheres de A.A., total que recebeu maior incentivo dos Pais: %ld\n", resultados_globais[3]);
         printf("5. Dentre os alunos de A.A., total com familiares com curso superior: %ld\n", resultados_globais[4]);
-
         printf("\n6. Quantos livros os alunos de TADS leram no ano?\n");
         printf("   - Nenhum (A):.................. %ld\n", resultados_globais[5]);
         printf("   - Um ou dois (B):.............. %ld\n", resultados_globais[6]);
         printf("   - Três a cinco (C):............ %ld\n", resultados_globais[7]);
         printf("   - Seis a oito (D):............. %ld\n", resultados_globais[8]);
         printf("   - Mais de oito (E):............ %ld\n", resultados_globais[9]);
-
         printf("\n7. Quantas horas semanais os alunos de TADS se dedicaram aos estudos?\n");
         printf("   - Nenhuma (A):................. %ld\n", resultados_globais[10]);
         printf("   - De uma a três (B):........... %ld\n", resultados_globais[11]);
@@ -218,7 +190,6 @@ int main(int argc, char** argv) {
         printf("   - De oito a doze (D):.......... %ld\n", resultados_globais[13]);
         printf("   - Mais de doze (E):............ %ld\n", resultados_globais[14]);
     }
-    
     MPI_Finalize();
     return 0;
 }
