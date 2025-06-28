@@ -1,6 +1,5 @@
-// Arquivo: analisador_enade_final_robusto.c
-// Versão que primeiro mapeia todos os cursos de ADS usando CO_GRUPO = 72
-// e depois usa esse mapa para filtrar os dados das perguntas.
+// Arquivo: analisador_enade_final_corrigido.c
+// Versão com a correção crítica na ordem das colunas do arquivo de mapa de cursos.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,7 +7,6 @@
 #include <mpi.h>
 
 // --- CONFIGURAÇÃO ---
-// ATUALIZAÇÃO: O primeiro arquivo da lista agora é o arq1, que mapeia os cursos.
 const char* ARQUIVO_MAPA_CURSOS = "DADOS_2021/microdados2021_arq1.txt";
 const char* NOMES_ARQUIVOS_PERGUNTAS[] = {
     "DADOS_2021/microdados2021_arq5.txt",
@@ -20,7 +18,7 @@ const char* NOMES_ARQUIVOS_PERGUNTAS[] = {
     "DADOS_2021/microdados2021_arq29.txt"
 };
 const int NUM_ARQUIVOS_PERGUNTAS = 7;
-const char* CODIGO_GRUPO_ADS = "72"; // O código de área correto
+const char* CODIGO_GRUPO_ADS = "72";
 
 #define MAX_LINE_LEN 256
 #define NUM_RESULTS 15
@@ -28,14 +26,12 @@ const char* CODIGO_GRUPO_ADS = "72"; // O código de área correto
 // Função auxiliar para verificar se um co_curso pertence à lista de cursos de ADS
 int is_ads_course(const char* co_curso, char** ads_course_list, int count) {
     for (int i = 0; i < count; i++) {
-        if (strcmp(co_curso, ads_course_list[i]) == 0) {
-            return 1; // Encontrado
-        }
+        if (strcmp(co_curso, ads_course_list[i]) == 0) return 1;
     }
-    return 0; // Não encontrado
+    return 0;
 }
 
-// A função de análise do bloco continua a mesma
+// A função de análise do bloco não precisa de mudanças.
 void analisar_bloco(char* bloco, long* resultados_locais) {
     char* linha_saveptr;
     char* linha = strtok_r(bloco, "\n", &linha_saveptr);
@@ -74,29 +70,35 @@ int main(int argc, char** argv) {
         char** ads_courses_list = NULL;
         int ads_courses_count = 0;
         char line[MAX_LINE_LEN];
-        fgets(line, sizeof(line), fp_mapa); // Pula cabeçalho
+        fgets(line, sizeof(line), fp_mapa);
 
         while (fgets(line, sizeof(line), fp_mapa)) {
             char* co_curso_str;
             char* co_grupo_str;
-            // É preciso pegar as colunas corretas de co_grupo e co_curso
-            // Vamos supor que são a 2a e 5a coluna, respectivamente. VERIFIQUE NO DICIONÁRIO!
-            strtok(line, ";"); // NU_ANO
-            co_curso_str = strtok(NULL, ";"); // CO_CURSO
-            strtok(NULL, ";"); // CO_IES
-            strtok(NULL, ";"); // CO_CATEGAD
-            co_grupo_str = strtok(NULL, ";"); // CO_GRUPO
+            char* line_copy = strdup(line); // Usar uma cópia para strtok não destruir a original
 
-            if (co_grupo_str && strcmp(co_grupo_str, CODIGO_GRUPO_ADS) == 0) {
+            // ATUALIZAÇÃO CRÍTICA: Corrigindo a ordem das colunas com base na imagem.
+            strtok(line_copy, ";");                  // 1. NU_ANO
+            co_curso_str = strtok(NULL, ";");      // 2. CO_CURSO
+            strtok(NULL, ";");                     // 3. CO_IES
+            strtok(NULL, ";");                     // 4. CO_CATEGAD
+            strtok(NULL, ";");                     // 5. CO_ORGACAD
+            co_grupo_str = strtok(NULL, ";");      // 6. CO_GRUPO (agora está correto!)
+
+            if (co_grupo_str && co_curso_str && strcmp(co_grupo_str, CODIGO_GRUPO_ADS) == 0) {
                 ads_courses_count++;
                 ads_courses_list = realloc(ads_courses_list, ads_courses_count * sizeof(char*));
                 ads_courses_list[ads_courses_count - 1] = strdup(co_curso_str);
             }
+            free(line_copy); // Liberar a memória da cópia da linha
         }
         fclose(fp_mapa);
         printf("Mestre (Rank 0): Mapeamento concluído. %d cursos de ADS encontrados.\n", ads_courses_count);
         printf("Mestre (Rank 0): Lendo e unificando dados das perguntas...\n");
 
+        // O restante do código (unificação, distribuição, análise e impressão) não precisa de alterações
+        // pois ele já depende da 'ads_courses_list' que agora está correta.
+        
         // ETAPA 2: MESTRE UNIFICA OS DADOS DAS PERGUNTAS USANDO O MAPA
         FILE* readers[NUM_ARQUIVOS_PERGUNTAS];
         for (int i = 0; i < NUM_ARQUIVOS_PERGUNTAS; i++) {
@@ -109,18 +111,14 @@ int main(int argc, char** argv) {
         size_t current_pos = 0;
         dados_unificados[0] = '\0';
         char linhas[NUM_ARQUIVOS_PERGUNTAS][MAX_LINE_LEN];
-
         while(fgets(linhas[0], sizeof(linhas[0]), readers[0]) != NULL) {
             int linha_valida = 1;
             for(int i = 1; i < NUM_ARQUIVOS_PERGUNTAS; i++) { if (fgets(linhas[i], sizeof(linhas[i]), readers[i]) == NULL) { linha_valida = 0; break; } }
             if (!linha_valida) break;
-
             char temp_line[MAX_LINE_LEN];
             strcpy(temp_line, linhas[0]);
             char* ano = strtok(temp_line, ";");
             char* curso = strtok(NULL, ";");
-
-            // ATUALIZAÇÃO: Filtro agora usa a lista de cursos mapeados
             if (curso && is_ads_course(curso, ads_courses_list, ads_courses_count)) {
                 char linha_combinada[MAX_LINE_LEN * 2];
                 sprintf(linha_combinada, "%s;%s", ano, curso);
@@ -141,8 +139,6 @@ int main(int argc, char** argv) {
         for (int i=0; i<ads_courses_count; i++) free(ads_courses_list[i]);
         free(ads_courses_list);
         printf("Mestre (Rank 0): Leitura concluída. Total de %zu bytes para TADS. Distribuindo trabalho...\n", current_pos);
-
-        // O resto do código (distribuição, etc.) continua igual...
         long chunk_size = current_pos / n_procs;
         for (int i = 1; i < n_procs; i++) {
             long start = i * chunk_size;
