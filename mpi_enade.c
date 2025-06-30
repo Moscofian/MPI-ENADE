@@ -1,8 +1,8 @@
 // Arquivo: analisador_enade_pt.c
-// Descrição: Versão final do analisador de dados do ENADE 2021 em português.
+// Descrição: 
 //            Processa cada arquivo de forma independente e apresenta os resultados
 //            com totais por pergunta e porcentagens de resposta.
-//            Projetado para ser executado com EXATAMENTE 4 processos.
+//            Projetado para ser executado com 4 processos.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,19 +15,20 @@
 // =================================================================================
 
 const char* ARQUIVOS_QUESTOES[] = {
-    "microdados2021_arq21.txt", // 0: QE_I15 (Ação Afirmativa)
-    "microdados2021_arq5.txt",  // 1: TP_SEXO (Impossível de usar para cruzar dados)
-    "microdados2021_arq24.txt", // 2: QE_I18 (Impossível de usar)
-    "microdados2021_arq25.txt", // 3: QE_I19 (Impossível de usar)
-    "microdados2021_arq27.txt", // 4: QE_I21 (Impossível de usar)
-    "microdados2021_arq28.txt", // 5: QE_I22 (Livros lidos)
-    "microdados2021_arq29.txt"  // 6: QE_I23 (Horas de estudo)
+    "DADOS/microdados2021_arq21.txt", // 0: QE_I15 (Ação Afirmativa)
+    "DADOS/microdados2021_arq5.txt",  // 1: TP_SEXO (Impossível de usar para cruzar dados)
+    "DADOS/microdados2021_arq24.txt", // 2: QE_I18 (Impossível de usar)
+    "DADOS/microdados2021_arq25.txt", // 3: QE_I19 (Impossível de usar)
+    "DADOS/microdados2021_arq27.txt", // 4: QE_I21 (Impossível de usar)
+    "DADOS/microdados2021_arq28.txt", // 5: QE_I22 (Livros lidos)
+    "DADOS/microdados2021_arq29.txt"  // 6: QE_I23 (Horas de estudo)
 };
+
 // Enum para facilitar a leitura do código, associando um nome ao índice do arquivo
 enum IndiceQuestao { ACAO_AFIRMATIVA = 0, SEXO = 1, TIPO_EM = 2, INCENTIVO = 3, ESCOLARIDADE_FAM = 4, LIVROS = 5, HORAS_ESTUDO = 6 };
 
 const int NUM_ARQUIVOS_QUESTOES = 7;
-const char* ARQUIVO_MAPA_CURSOS = "microdados2021_arq1.txt";
+const char* ARQUIVO_MAPA_CURSOS = "DADOS/microdados2021_arq1.txt";
 const long CODIGO_GRUPO_TADS = 72;
 
 #define TAM_MAX_LINHA 512
