@@ -1,210 +1,282 @@
-// Arquivo: analisador_enade_pt.c
-// Descrição: 
-//            Processa cada arquivo de forma independente e apresenta os resultados
-//            com totais por pergunta e porcentagens de resposta.
-//            Projetado para ser executado com 4 processos.
-
+#include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <mpi.h>
-#include <ctype.h>
 
-// =================================================================================
-// --- SEÇÃO DE CONFIGURAÇÃO ---
-// =================================================================================
+#define MAX_LINE_LEN 2048
+#define ADS_GROUP_CODE 72
 
-const char* ARQUIVOS_QUESTOES[] = {
-    "DADOS/microdados2021_arq21.txt", // 0: QE_I15 (Ação Afirmativa)
-    "DADOS/microdados2021_arq5.txt",  // 1: TP_SEXO (Impossível de usar para cruzar dados)
-    "DADOS/microdados2021_arq24.txt", // 2: QE_I18 (Impossível de usar)
-    "DADOS/microdados2021_arq25.txt", // 3: QE_I19 (Impossível de usar)
-    "DADOS/microdados2021_arq27.txt", // 4: QE_I21 (Impossível de usar)
-    "DADOS/microdados2021_arq28.txt", // 5: QE_I22 (Livros lidos)
-    "DADOS/microdados2021_arq29.txt"  // 6: QE_I23 (Horas de estudo)
-};
-
-// Enum para facilitar a leitura do código, associando um nome ao índice do arquivo
-enum IndiceQuestao { ACAO_AFIRMATIVA = 0, SEXO = 1, TIPO_EM = 2, INCENTIVO = 3, ESCOLARIDADE_FAM = 4, LIVROS = 5, HORAS_ESTUDO = 6 };
-
-const int NUM_ARQUIVOS_QUESTOES = 7;
-const char* ARQUIVO_MAPA_CURSOS = "DADOS/microdados2021_arq1.txt";
-const long CODIGO_GRUPO_TADS = 72;
-
-#define TAM_MAX_LINHA 512
-#define TAM_CODIGO_CURSO 10
-
-// =================================================================================
-// --- ESTRUTURAS DE DADOS E FUNÇÕES AUXILIARES ---
-// =================================================================================
-
-// Estrutura para armazenar os resultados da análise
+// Estrutura atualizada para incluir contadores de respostas nulas/inválidas.
 typedef struct {
-    long alunos_aa_sim;
-    long alunos_aa_nao;
-    // Livros
-    long livros_nenhum; long livros_1_a_2; long livros_3_a_5; long livros_6_a_8; long livros_mais_de_8;
-    // Horas de Estudo
-    long estudo_nenhuma; long estudo_1_a_3; long estudo_4_a_7; long estudo_8_a_12; long estudo_mais_de_12;
-} ResultadosAnalise;
+    long long total_students;
+    long long female_students;
+    long long tech_hs_students;
+    long long affirmative_action_total;
+    // Contadores de Incentivo
+    long long incentive_parents, incentive_family, incentive_teachers, incentive_friends,
+              incentive_religious, incentive_others, incentive_none, incentive_null;
+    // Contadores de Família Graduada
+    long long family_graduated_yes, family_graduated_no, family_graduated_null;
+    // Contadores de Livros
+    long long books_none, books_1_2, books_3_5, books_6_8, books_more_8, books_null;
+    // Contadores de Horas de Estudo
+    long long study_hours_none, study_hours_1_3, study_hours_4_7, study_hours_8_12,
+              study_hours_more_12, study_hours_null;
+} Results;
 
-// Função para limpar aspas e espaços em branco do início e fim de uma string
-void limpar_aspas_e_espacos(char *str) {
-    if (str == NULL || *str == '\0') return;
-    char *inicio = str;
-    while (isspace((unsigned char)*inicio) || *inicio == '"') inicio++;
-    char *fim = str + strlen(str) - 1;
-    while (fim > inicio && (isspace((unsigned char)*fim) || *fim == '"')) fim--;
-    *(fim + 1) = '\0';
-    if (inicio != str) memmove(str, inicio, strlen(inicio) + 1);
-}
-
-// Verifica se um código de curso está na lista de cursos de TADS
-int eh_curso_tads(const char* codigo_curso, char (*lista_tads)[TAM_CODIGO_CURSO], int contagem) {
-    for (int i = 0; i < contagem; i++) {
-        if (strcmp(codigo_curso, lista_tads[i]) == 0) return 1;
+// Função para verificar se um curso já existe na lista para evitar duplicatas.
+int is_course_in_list(int course_code, const int* list, int size) {
+    for (int i = 0; i < size; i++) {
+        if (list[i] == course_code) return 1;
     }
     return 0;
 }
 
-// Processa um único arquivo de perguntas do início ao fim
-void processar_arquivo_unico(const char* nome_arquivo, int indice_arquivo, char (*lista_codigos_tads)[TAM_CODIGO_CURSO], int contagem_tads, ResultadosAnalise* resultados) {
-    FILE* fp = fopen(nome_arquivo, "r");
+// Função para verificar se um código de curso pertence à lista final de cursos de ADS
+int is_ads_course(int course_code, const int* ads_courses, int num_ads_courses) {
+    for (int i = 0; i < num_ads_courses; i++) {
+        if (ads_courses[i] == course_code) return 1;
+    }
+    return 0;
+}
+
+// Processa um único arquivo de dados e atualiza os contadores locais
+void process_data_file(const char* filename, int rank, int world_size, const int* ads_courses, int num_ads_courses, Results* local_results) {
+    FILE* fp = fopen(filename, "r");
     if (!fp) {
-        fprintf(stderr, "Aviso: Não foi possível abrir o arquivo %s. Ignorando.\n", nome_arquivo);
+        if (rank == 0) fprintf(stderr, "Aviso: Não foi possível abrir %s.\n", filename);
         return;
     }
-    char linha[TAM_MAX_LINHA];
-    fgets(linha, sizeof(linha), fp); // Pula o cabeçalho
-    while (fgets(linha, sizeof(linha), fp)) {
-        char* copia_linha = strdup(linha);
-        char* saveptr; strtok_r(copia_linha, ";", &saveptr);
-        char* str_co_curso = strtok_r(NULL, ";", &saveptr);
-        char* resposta = strtok_r(NULL, "\r\n", &saveptr);
-        if (!str_co_curso || !resposta) { free(copia_linha); continue; }
-        
-        limpar_aspas_e_espacos(str_co_curso);
-        limpar_aspas_e_espacos(resposta);
-        
-        if (eh_curso_tads(str_co_curso, lista_codigos_tads, contagem_tads)) {
-            switch (indice_arquivo) {
-                case ACAO_AFIRMATIVA:
-                    if (strcmp(resposta, "A") == 0) {
-                        resultados->alunos_aa_nao++;
-                    } else if (strlen(resposta) > 0 && strcmp(resposta, ".") != 0) {
-                        resultados->alunos_aa_sim++;
+
+    char line[MAX_LINE_LEN];
+    long long line_number = 0;
+    fgets(line, sizeof(line), fp); // Pula cabeçalho
+
+    while (fgets(line, sizeof(line), fp)) {
+        if (line_number % world_size == rank) {
+            int year = 0, course_code = 0;
+            char answer_str[2] = {0};
+
+            // Este sscanf está CORRETO para os arquivos de resposta (ex: 2021;12345;"F")
+            sscanf(line, "%d;%d;\"%1s\"", &year, &course_code, answer_str);
+            
+            if (is_ads_course(course_code, ads_courses, num_ads_courses)) {
+                if (strcmp(filename, "DADOS/microdados2021_arq5.txt") == 0) {
+                    local_results->total_students++;
+                    if (answer_str[0] == 'F') local_results->female_students++;
+                } else if (strcmp(filename, "DADOS/microdados2021_arq24.txt") == 0) {
+                    if (answer_str[0] == 'B') local_results->tech_hs_students++;
+                } else if (strcmp(filename, "DADOS/microdados2021_arq21.txt") == 0) {
+                    if (answer_str[0] != 'A' && answer_str[0] != ' ' && answer_str[0] != '.') local_results->affirmative_action_total++;
+                } else if (strcmp(filename, "DADOS/microdados2021_arq25.txt") == 0) {
+                    switch (answer_str[0]) {
+                        case 'A': local_results->incentive_none++; break; case 'B': local_results->incentive_parents++; break;
+                        case 'C': local_results->incentive_family++; break; case 'D': local_results->incentive_teachers++; break;
+                        case 'E': local_results->incentive_religious++; break; case 'F': local_results->incentive_friends++; break;
+                        case 'G': local_results->incentive_others++; break; default: local_results->incentive_null++; break;
                     }
-                    break;
-                case LIVROS:
-                    if (strcmp(resposta, "A") == 0) resultados->livros_nenhum++;
-                    else if (strcmp(resposta, "B") == 0) resultados->livros_1_a_2++;
-                    else if (strcmp(resposta, "C") == 0) resultados->livros_3_a_5++;
-                    else if (strcmp(resposta, "D") == 0) resultados->livros_6_a_8++;
-                    else if (strcmp(resposta, "E") == 0) resultados->livros_mais_de_8++;
-                    break;
-                case HORAS_ESTUDO:
-                    if (strcmp(resposta, "A") == 0) resultados->estudo_nenhuma++;
-                    else if (strcmp(resposta, "B") == 0) resultados->estudo_1_a_3++;
-                    else if (strcmp(resposta, "C") == 0) resultados->estudo_4_a_7++;
-                    else if (strcmp(resposta, "D") == 0) resultados->estudo_8_a_12++;
-                    else if (strcmp(resposta, "E") == 0) resultados->estudo_mais_de_12++;
-                    break;
+                } else if (strcmp(filename, "DADOS/microdados2021_arq27.txt") == 0) {
+                    switch (answer_str[0]) {
+                        case 'A': local_results->family_graduated_yes++; break; case 'B': local_results->family_graduated_no++; break;
+                        default: local_results->family_graduated_null++; break;
+                    }
+                } else if (strcmp(filename, "DADOS/microdados2021_arq28.txt") == 0) {
+                    switch (answer_str[0]) {
+                        case 'A': local_results->books_none++; break; case 'B': local_results->books_1_2++; break;
+                        case 'C': local_results->books_3_5++; break; case 'D': local_results->books_6_8++; break;
+                        case 'E': local_results->books_more_8++; break; default: local_results->books_null++; break;
+                    }
+                } else if (strcmp(filename, "DADOS/microdados2021_arq29.txt") == 0) {
+                    switch (answer_str[0]) {
+                        case 'A': local_results->study_hours_none++; break; case 'B': local_results->study_hours_1_3++; break;
+                        case 'C': local_results->study_hours_4_7++; break; case 'D': local_results->study_hours_8_12++; break;
+                        case 'E': local_results->study_hours_more_12++; break; default: local_results->study_hours_null++; break;
+                    }
+                }
             }
         }
-        free(copia_linha);
+        line_number++;
     }
     fclose(fp);
 }
 
-// =================================================================================
-// --- FUNÇÃO PRINCIPAL ---
-// =================================================================================
+// Função de impressão dos resultados (sem alterações)
+void print_final_results(int num_ads_courses, const Results* final_results) {
+    printf("\n===================================================\n");
+    printf("   Análise dos Microdados do ENADE para ADS\n");
+    printf("===================================================\n\n");
+    
+    printf("DETECÇÃO INICIAL:\n");
+    printf("- Cursos de ADS (CO_GRUPO %d) capturados: %d\n", ADS_GROUP_CODE, num_ads_courses);
+    printf("- Total de alunos de ADS detectados (baseado no arq5): %lld\n\n", final_results->total_students);
+    printf("---------------------------------------------------\n\n");
+
+    if (final_results->total_students == 0) {
+        printf("Nenhum estudante do curso de ADS foi encontrado nos dados para análise.\n");
+        return;
+    }
+    long long total_base_count = final_results->total_students;
+
+    printf("1. Qual é a porcentagem de estudante do sexo Feminino?\n");
+    double female_percentage = (total_base_count > 0) ? (double)final_results->female_students * 100.0 / total_base_count : 0;
+    printf("   Resposta: %lld estudantes (%.2f%% do total).\n\n", final_results->female_students, female_percentage);
+
+    printf("2. Qual é a porcentagem de estudantes que cursaram o ensino técnico no ensino médio?\n");
+    double tech_hs_percentage = (total_base_count > 0) ? (double)final_results->tech_hs_students * 100.0 / total_base_count : 0;
+    printf("   Resposta: %lld estudantes (%.2f%% do total).\n\n", final_results->tech_hs_students, tech_hs_percentage);
+
+    printf("3. Qual é o percentual de alunos provenientes de ações afirmativas?\n");
+    double affirmative_action_percentage = (total_base_count > 0) ? (double)final_results->affirmative_action_total * 100.0 / total_base_count : 0;
+    printf("   Resposta: %lld estudantes (%.2f%% do total).\n\n", final_results->affirmative_action_total, affirmative_action_percentage);
+    
+    printf("4. Dos estudantes, quem deu incentivo para este estudante cursar o ADS?\n");
+    long long total_incentive_valid = final_results->incentive_parents + final_results->incentive_family + final_results->incentive_teachers + final_results->incentive_friends + final_results->incentive_religious + final_results->incentive_others + final_results->incentive_none;
+    if (total_incentive_valid > 0) {
+        printf("   - Pais:                 %lld (%.2f%%)\n", final_results->incentive_parents, (double)final_results->incentive_parents * 100.0 / total_incentive_valid);
+        printf("   - Outros familiares:    %lld (%.2f%%)\n", final_results->incentive_family, (double)final_results->incentive_family * 100.0 / total_incentive_valid);
+        printf("   - Professores:          %lld (%.2f%%)\n", final_results->incentive_teachers, (double)final_results->incentive_teachers * 100.0 / total_incentive_valid);
+        printf("   - Colegas/Amigos:       %lld (%.2f%%)\n", final_results->incentive_friends, (double)final_results->incentive_friends * 100.0 / total_incentive_valid);
+        printf("   - Líder religioso:      %lld (%.2f%%)\n", final_results->incentive_religious, (double)final_results->incentive_religious * 100.0 / total_incentive_valid);
+        printf("   - Outras pessoas:       %lld (%.2f%%)\n", final_results->incentive_others, (double)final_results->incentive_others * 100.0 / total_incentive_valid);
+        printf("   - Ninguém:              %lld (%.2f%%)\n", final_results->incentive_none, (double)final_results->incentive_none * 100.0 / total_incentive_valid);
+        printf("   - Respostas Nulas/Inválidas: %lld\n\n", final_results->incentive_null);
+    } else { printf("   Nenhum dado encontrado para esta questão.\n\n"); }
+
+    printf("5. Quantos estudantes apresentaram familiares com o curso superior concluído?\n");
+    long long total_family_valid = final_results->family_graduated_yes + final_results->family_graduated_no;
+     if (total_family_valid > 0) {
+        printf("   - Sim: %lld (%.2f%%)\n", final_results->family_graduated_yes, (double)final_results->family_graduated_yes * 100.0 / total_family_valid);
+        printf("   - Não: %lld (%.2f%%)\n", final_results->family_graduated_no, (double)final_results->family_graduated_no * 100.0 / total_family_valid);
+        printf("   - Respostas Nulas/Inválidas: %lld\n\n", final_results->family_graduated_null);
+    } else { printf("   Nenhum dado encontrado para esta questão.\n\n"); }
+
+    printf("6. Quantos livros os alunos leram no ano do ENADE?\n");
+    long long total_books_valid = final_results->books_none + final_results->books_1_2 + final_results->books_3_5 + final_results->books_6_8 + final_results->books_more_8;
+    if (total_books_valid > 0) {
+       printf("   - Nenhum:        %lld (%.2f%%)\n", final_results->books_none, (double)final_results->books_none * 100.0 / total_books_valid);
+       printf("   - 1 ou 2:        %lld (%.2f%%)\n", final_results->books_1_2, (double)final_results->books_1_2 * 100.0 / total_books_valid);
+       printf("   - 3 a 5:         %lld (%.2f%%)\n", final_results->books_3_5, (double)final_results->books_3_5 * 100.0 / total_books_valid);
+       printf("   - 6 a 8:         %lld (%.2f%%)\n", final_results->books_6_8, (double)final_results->books_6_8 * 100.0 / total_books_valid);
+       printf("   - Mais de 8:     %lld (%.2f%%)\n", final_results->books_more_8, (double)final_results->books_more_8 * 100.0 / total_books_valid);
+       printf("   - Respostas Nulas/Inválidas: %lld\n\n", final_results->books_null);
+    } else { printf("   Nenhum dado encontrado para esta questão.\n\n"); }
+    
+    printf("7. Quantas horas na semana os estudantes se dedicaram aos estudos?\n");
+    long long total_study_valid = final_results->study_hours_none + final_results->study_hours_1_3 + final_results->study_hours_4_7 + final_results->study_hours_8_12 + final_results->study_hours_more_12;
+    if (total_study_valid > 0) {
+        printf("   - Nenhuma (só aulas): %lld (%.2f%%)\n", final_results->study_hours_none, (double)final_results->study_hours_none * 100.0 / total_study_valid);
+        printf("   - 1 a 3 horas:        %lld (%.2f%%)\n", final_results->study_hours_1_3, (double)final_results->study_hours_1_3 * 100.0 / total_study_valid);
+        printf("   - 4 a 7 horas:        %lld (%.2f%%)\n", final_results->study_hours_4_7, (double)final_results->study_hours_4_7 * 100.0 / total_study_valid);
+        printf("   - 8 a 12 horas:       %lld (%.2f%%)\n", final_results->study_hours_8_12, (double)final_results->study_hours_8_12 * 100.0 / total_study_valid);
+        printf("   - Mais de 12 horas:   %lld (%.2f%%)\n", final_results->study_hours_more_12, (double)final_results->study_hours_more_12 * 100.0 / total_study_valid);
+        printf("   - Respostas Nulas/Inválidas: %lld\n\n", final_results->study_hours_null);
+    } else { printf("   Nenhum dado encontrado para esta questão.\n\n"); }
+}
+
+
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
-    int meu_rank, num_processos;
-    MPI_Comm_rank(MPI_COMM_WORLD, &meu_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &num_processos);
+
+    int world_size, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     
-    // VERIFICAÇÃO: Garante que o programa seja executado com exatamente 4 processos.
-    if (num_processos != 4) {
-        if (meu_rank == 0) { // Apenas o processo mestre imprime a mensagem de erro.
-            fprintf(stderr, "Erro: Este programa foi projetado para ser executado com exatamente 4 processos.\n");
-            fprintf(stderr, "Por favor, execute com: mpiexec -n 4 %s\n", argv[0]);
+    double start_time;
+
+    if (rank == 0) {
+        printf("Análise iniciada com %d processos.\n", world_size);
+        start_time = MPI_Wtime();
+    }
+    
+    int num_ads_courses = 0;
+    int* ads_courses = NULL; 
+
+    if (rank == 0) {
+        int capacity = 0; 
+        const char* arq1_path = "DADOS/microdados2021_arq1.txt";
+        printf("Processo 0: Lendo a lista de cursos de ADS de '%s'...\n", arq1_path);
+        
+        FILE* fp = fopen(arq1_path, "r");
+        if (!fp) {
+            fprintf(stderr, "Erro fatal: não foi possível abrir '%s'.\n", arq1_path);
+            MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        MPI_Finalize();
-        return 1; // Encerra a execução para todos os processos
+
+        char line[MAX_LINE_LEN];
+        fgets(line, sizeof(line), fp);
+
+        while (fgets(line, sizeof(line), fp)) {
+            int course_code = 0, group_code = 0;
+            
+            // ** CORREÇÃO CRÍTICA APLICADA **
+            // Este formato lê os números puros do arquivo arq1.txt, sem esperar aspas.
+            // O formato "%*[^;];" pula uma coluna inteira de qualquer tipo.
+            int items_read = sscanf(line, "%*[^;];%d;%*[^;];%*[^;];%*[^;];%d", &course_code, &group_code);
+            
+            if (items_read >= 2 && group_code == ADS_GROUP_CODE) {
+                // Adiciona o curso somente se ele for ÚNICO.
+                if (!is_course_in_list(course_code, ads_courses, num_ads_courses)) {
+                    if (num_ads_courses == capacity) {
+                        int new_capacity = (capacity == 0) ? 100 : capacity * 2;
+                        int* temp_ptr = realloc(ads_courses, new_capacity * sizeof(int));
+                        if (!temp_ptr) {
+                            fprintf(stderr, "Erro fatal: falha ao alocar memória.\n");
+                            free(ads_courses);
+                            MPI_Abort(MPI_COMM_WORLD, 1);
+                        }
+                        ads_courses = temp_ptr;
+                        capacity = new_capacity;
+                    }
+                    ads_courses[num_ads_courses++] = course_code;
+                }
+            }
+        }
+        fclose(fp);
+        printf("Processo 0: Encontrou %d cursos únicos. Distribuindo para os outros processos...\n", num_ads_courses);
+    }
+
+    MPI_Bcast(&num_ads_courses, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    if (rank != 0) {
+        ads_courses = (int*)malloc(num_ads_courses * sizeof(int));
+        if (ads_courses == NULL && num_ads_courses > 0) {
+             fprintf(stderr, "Processo %d: falha ao alocar memória.\n", rank);
+             MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+    MPI_Bcast(ads_courses, num_ads_courses, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    MPI_Barrier(MPI_COMM_WORLD); 
+    if (rank == 0) printf("\nIniciando a análise paralela dos arquivos de dados...\n\n");
+
+    Results local_results = {0};
+    const char* data_files[] = {
+        "DADOS/microdados2021_arq5.txt", "DADOS/microdados2021_arq21.txt", "DADOS/microdados2021_arq24.txt",
+        "DADOS/microdados2021_arq25.txt", "DADOS/microdados2021_arq27.txt", "DADOS/microdados2021_arq28.txt",
+        "DADOS/microdados2021_arq29.txt"
+    };
+    int num_data_files = sizeof(data_files) / sizeof(data_files[0]);
+
+    for (int i = 0; i < num_data_files; ++i) {
+        if (rank == 0) printf("Analisando: %s...\n", data_files[i]);
+        process_data_file(data_files[i], rank, world_size, ads_courses, num_ads_courses, &local_results);
+        MPI_Barrier(MPI_COMM_WORLD); 
+    }
+
+    if (rank == 0) printf("\nAnálise paralela concluída. Agregando resultados...\n");
+
+    Results final_results = {0};
+    int num_struct_elements = sizeof(Results) / sizeof(long long);
+    MPI_Reduce(&local_results, &final_results, num_struct_elements, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        double end_time = MPI_Wtime();
+        print_final_results(num_ads_courses, &final_results);
+        printf("---------------------------------------------------\n");
+        printf("Análise concluída em %.4f segundos.\n", end_time - start_time);
     }
     
-    // ETAPAS 1 e 2: Mapeamento e Broadcast dos cursos
-    char (*lista_codigos_tads)[TAM_CODIGO_CURSO] = NULL;
-    int contagem_cursos_tads = 0;
-    if (meu_rank == 0) {
-        printf("Mestre (Rank 0): Mapeando cursos de TADS (Grupo %ld)...\n", CODIGO_GRUPO_TADS);
-        FILE* fp = fopen(ARQUIVO_MAPA_CURSOS, "r"); if (!fp) { MPI_Abort(MPI_COMM_WORLD, 1); }
-        char linha[TAM_MAX_LINHA]; fgets(linha, sizeof(linha), fp);
-        while (fgets(linha, sizeof(linha), fp)) {
-            char* copia_linha = strdup(linha); char* saveptr; strtok_r(copia_linha, ";", &saveptr);
-            char* str_co_curso = strtok_r(NULL, ";", &saveptr);
-            strtok_r(NULL, ";", &saveptr); strtok_r(NULL, ";", &saveptr); strtok_r(NULL, ";", &saveptr);
-            char* str_co_grupo = strtok_r(NULL, ";", &saveptr);
-            if (str_co_grupo && str_co_curso && atol(str_co_grupo) == CODIGO_GRUPO_TADS) {
-                limpar_aspas_e_espacos(str_co_curso); int encontrado = 0;
-                for (int i = 0; i < contagem_cursos_tads; i++) { if (strcmp(lista_codigos_tads[i], str_co_curso) == 0) { encontrado = 1; break; } }
-                if (!encontrado) {
-                    contagem_cursos_tads++; lista_codigos_tads = realloc(lista_codigos_tads, contagem_cursos_tads * sizeof(*lista_codigos_tads));
-                    strncpy(lista_codigos_tads[contagem_cursos_tads - 1], str_co_curso, TAM_CODIGO_CURSO - 1);
-                    lista_codigos_tads[contagem_cursos_tads - 1][TAM_CODIGO_CURSO - 1] = '\0';
-                }
-            } free(copia_linha);
-        } fclose(fp);
-        printf("Mestre (Rank 0): Mapeamento concluído. %d cursos de TADS únicos encontrados.\n", contagem_cursos_tads);
-    }
-    MPI_Bcast(&contagem_cursos_tads, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    if (meu_rank != 0) { lista_codigos_tads = malloc(contagem_cursos_tads * sizeof(*lista_codigos_tads)); }
-    MPI_Bcast(lista_codigos_tads, contagem_cursos_tads * TAM_CODIGO_CURSO, MPI_CHAR, 0, MPI_COMM_WORLD);
-
-    // ETAPAS 3 e 4: Processamento e Agregação
-    ResultadosAnalise resultados_locais = {0};
-    for (int i = meu_rank; i < NUM_ARQUIVOS_QUESTOES; i += num_processos) {
-        processar_arquivo_unico(ARQUIVOS_QUESTOES[i], i, lista_codigos_tads, contagem_cursos_tads, &resultados_locais);
-    }
-    free(lista_codigos_tads);
-    ResultadosAnalise resultados_globais = {0};
-    MPI_Reduce(&resultados_locais, &resultados_globais, sizeof(ResultadosAnalise)/sizeof(long), MPI_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
-
-    // --- ETAPA 5: APRESENTAÇÃO DOS RESULTADOS (RANK 0) ---
-    if (meu_rank == 0) {
-        printf("\n--- RESULTADOS DA ANÁLISE ENADE 2021 (CURSO: TADS) ---\n\n");
-        printf("AVISO IMPORTANTE: Devido à estrutura dos dados, apenas as perguntas\n");
-        printf("que podem ser respondidas de forma independente são mostradas abaixo.\n\n");
-        
-        long total_respostas_aa = resultados_globais.alunos_aa_sim + resultados_globais.alunos_aa_nao;
-        printf("1. Análise sobre ingresso por Ações Afirmativas (A.A.)\n");
-        printf("   Total de respostas válidas para esta pergunta: %ld\n", total_respostas_aa);
-        printf("   - Sim, ingressou por A.A.: ............ %ld (%.2f%%)\n", resultados_globais.alunos_aa_sim, (total_respostas_aa > 0) ? (double)resultados_globais.alunos_aa_sim / total_respostas_aa * 100.0 : 0.0);
-        printf("   - Não, ingressou por ampla concorrência: %ld (%.2f%%)\n\n", resultados_globais.alunos_aa_nao, (total_respostas_aa > 0) ? (double)resultados_globais.alunos_aa_nao / total_respostas_aa * 100.0 : 0.0);
-        
-        long total_respostas_livros = resultados_globais.livros_nenhum + resultados_globais.livros_1_a_2 + resultados_globais.livros_3_a_5 + resultados_globais.livros_6_a_8 + resultados_globais.livros_mais_de_8;
-        printf("2. Quantos livros os alunos de TADS leram neste ano?\n");
-        printf("   Total de respostas válidas para esta pergunta: %ld\n", total_respostas_livros);
-        printf("   - Nenhum: ............................... %ld (%.2f%%)\n", resultados_globais.livros_nenhum, (total_respostas_livros > 0) ? (double)resultados_globais.livros_nenhum / total_respostas_livros * 100.0 : 0.0);
-        printf("   - Um ou dois: ........................... %ld (%.2f%%)\n", resultados_globais.livros_1_a_2, (total_respostas_livros > 0) ? (double)resultados_globais.livros_1_a_2 / total_respostas_livros * 100.0 : 0.0);
-        printf("   - Três a cinco: ......................... %ld (%.2f%%)\n", resultados_globais.livros_3_a_5, (total_respostas_livros > 0) ? (double)resultados_globais.livros_3_a_5 / total_respostas_livros * 100.0 : 0.0);
-        printf("   - Seis a oito: .......................... %ld (%.2f%%)\n", resultados_globais.livros_6_a_8, (total_respostas_livros > 0) ? (double)resultados_globais.livros_6_a_8 / total_respostas_livros * 100.0 : 0.0);
-        printf("   - Mais de oito: ......................... %ld (%.2f%%)\n\n", resultados_globais.livros_mais_de_8, (total_respostas_livros > 0) ? (double)resultados_globais.livros_mais_de_8 / total_respostas_livros * 100.0 : 0.0);
-        
-        long total_respostas_estudo = resultados_globais.estudo_nenhuma + resultados_globais.estudo_1_a_3 + resultados_globais.estudo_4_a_7 + resultados_globais.estudo_8_a_12 + resultados_globais.estudo_mais_de_12;
-        printf("3. Quantas horas semanais os estudantes de TADS se dedicaram aos estudos?\n");
-        printf("   Total de respostas válidas para esta pergunta: %ld\n", total_respostas_estudo);
-        printf("   - Nenhuma: .............................. %ld (%.2f%%)\n", resultados_globais.estudo_nenhuma, (total_respostas_estudo > 0) ? (double)resultados_globais.estudo_nenhuma / total_respostas_estudo * 100.0 : 0.0);
-        printf("   - De uma a três: ........................ %ld (%.2f%%)\n", resultados_globais.estudo_1_a_3, (total_respostas_estudo > 0) ? (double)resultados_globais.estudo_1_a_3 / total_respostas_estudo * 100.0 : 0.0);
-        printf("   - De quatro a sete: ..................... %ld (%.2f%%)\n", resultados_globais.estudo_4_a_7, (total_respostas_estudo > 0) ? (double)resultados_globais.estudo_4_a_7 / total_respostas_estudo * 100.0 : 0.0);
-        printf("   - De oito a doze: ....................... %ld (%.2f%%)\n", resultados_globais.estudo_8_a_12, (total_respostas_estudo > 0) ? (double)resultados_globais.estudo_8_a_12 / total_respostas_estudo * 100.0 : 0.0);
-        printf("   - Mais de doze: ......................... %ld (%.2f%%)\n\n", resultados_globais.estudo_mais_de_12, (total_respostas_estudo > 0) ? (double)resultados_globais.estudo_mais_de_12 / total_respostas_estudo * 100.0 : 0.0);
-        
-        printf("-----------------------------------------------------------\n");
-    }
-
+    free(ads_courses);
     MPI_Finalize();
     return 0;
 }
